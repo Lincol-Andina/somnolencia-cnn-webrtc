@@ -37,6 +37,7 @@ import seaborn as sns
 import cv2
 import tensorflow as tf
 from tensorflow import keras
+import streamlit.components.v1 as components
 
 # Configuración inicial de la página en Streamlit
 st.set_page_config(
@@ -45,6 +46,42 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+def disable_browser_translation():
+    """
+    Streamlit declara el documento como lang="en". En apps en español, Chrome/Edge
+    puede ofrecer traducción automática y al modificar el DOM React falla con
+    'removeChild'. Este script marca el documento padre como español y sin traducción.
+    """
+    components.html(
+        """
+        <script>
+        (function () {
+            try {
+                const doc = window.parent.document;
+                doc.documentElement.lang = "es";
+                doc.documentElement.setAttribute("translate", "no");
+                doc.documentElement.classList.add("notranslate");
+                if (doc.body) doc.body.classList.add("notranslate");
+
+                if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+                    const meta = doc.createElement("meta");
+                    meta.name = "google";
+                    meta.content = "notranslate";
+                    doc.head.appendChild(meta);
+                }
+            } catch (e) {
+                console.warn("No se pudo desactivar la traducción automática:", e);
+            }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+disable_browser_translation()
 
 # =============================================================================
 # ESTILOS CSS PERSONALIZADOS (DISEÑO PROFESIONAL, GLASSMORPHISM Y ALTO IMPACTO)
