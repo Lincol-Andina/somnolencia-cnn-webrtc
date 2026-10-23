@@ -1,0 +1,13 @@
+# Dataset masivo (evitar subir más de 40,000 imágenes a GitHub)
+Driver Drowsiness Dataset (DDD)/
+
+# Archivos compilados y temporales de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Entornos virtuales
+venv/
+.env/
+env/
