@@ -33,3 +33,37 @@ jobs:
       - run: python -c "import pylibsrtp; print('OK', pylibsrtp.__version__)"
       - run: pip install --no-cache-dir "aiortc==1.15.0"
       - run: python -c "import aiortc; print('aiortc OK', aiortc.__version__)"
+
+  app-imports:
+    name: app-import-order
+    runs-on: ubuntu-latest
+    container: python:3.12-slim-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
+      - run: pip install --no-cache-dir -r requirements.txt
+      - name: control-pylibsrtp
+        continue-on-error: true
+        run: python -c "import pylibsrtp; print('OK control')"
+      - name: av-then-pylibsrtp
+        continue-on-error: true
+        run: python -c "import av; import pylibsrtp; print('OK av')"
+      - name: cv2-then-pylibsrtp
+        continue-on-error: true
+        run: python -c "import cv2; import pylibsrtp; print('OK cv2')"
+      - name: tensorflow-then-pylibsrtp
+        continue-on-error: true
+        run: python -c "import tensorflow; import pylibsrtp; print('OK tensorflow')"
+      - name: pyarrow-then-pylibsrtp
+        continue-on-error: true
+        run: python -c "import pyarrow; import pylibsrtp; print('OK pyarrow')"
+      - name: cryptography-then-pylibsrtp
+        continue-on-error: true
+        run: python -c "import cryptography; import pylibsrtp; print('OK cryptography')"
+      - name: av-cv2-tensorflow-pylibsrtp
+        continue-on-error: true
+        run: python -c "import av, cv2, tensorflow; import pylibsrtp; print('OK av-cv2-tensorflow')"
+      - name: exact-app-imports
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -c "import faulthandler, os, sys, json, time, glob, random, ipaddress, threading; from pathlib import Path; faulthandler.enable(); import numpy, pandas; from PIL import Image; import streamlit as st; import matplotlib.pyplot as plt; import seaborn as sns; import av, cv2, tensorflow as tf; from tensorflow import keras; import streamlit.components.v1 as components; from streamlit_webrtc import WebRtcMode, webrtc_streamer; print('OK exact app imports')"
