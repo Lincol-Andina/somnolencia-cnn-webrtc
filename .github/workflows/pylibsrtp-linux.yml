@@ -28,7 +28,7 @@ jobs:
     container: python:3.12-slim-trixie
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y --no-install-recommends gcc libsrtp2-dev libssl-dev pkg-config binutils
+      - run: apt-get update && apt-get install -y --no-install-recommends build-essential libsrtp2-dev libssl-dev pkg-config binutils
       - run: dpkg -l libsrtp2-dev libssl-dev; ls -l /usr/include/srtp2/srtp.h
       - name: build-from-source
         run: |
