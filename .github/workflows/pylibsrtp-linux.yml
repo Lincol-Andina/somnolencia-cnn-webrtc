@@ -67,3 +67,10 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         run: python -c "import faulthandler, os, sys, json, time, glob, random, ipaddress, threading; from pathlib import Path; faulthandler.enable(); import numpy, pandas; from PIL import Image; import streamlit as st; import matplotlib.pyplot as plt; import seaborn as sns; import av, cv2, tensorflow as tf; from tensorflow import keras; import streamlit.components.v1 as components; from streamlit_webrtc import WebRtcMode, webrtc_streamer; print('OK exact app imports')"
+      - name: pylibsrtp-in-thread
+        continue-on-error: true
+        run: python diagnostics/thread_pylibsrtp.py
+      - name: exact-app-imports-in-thread
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python diagnostics/thread_app_imports.py
