@@ -46,7 +46,8 @@ jobs:
       - run: pip install --no-cache-dir "aiortc==1.15.0" "streamlit==1.62.0" "pyarrow==24.0.0" "pandas==3.0.5"
       - run: python -c "import aiortc; print('aiortc OK', aiortc.__version__)"
       - name: pyarrow-main-then-pylibsrtp-thread
-        run: python -c "import faulthandler, threading, pyarrow, streamlit, pandas; faulthandler.enable(); t=threading.Thread(target=lambda: (__import__('pylibsrtp'), print('OK pyarrow-main-srtp-thread', flush=True))); t.start(); t.join()"
+        run: |
+          python -c "import faulthandler, threading, pyarrow, streamlit, pandas; faulthandler.enable(); t=threading.Thread(target=lambda: (__import__('pylibsrtp'), print('OK pyarrow-main-srtp-thread', flush=True))); t.start(); t.join()"
 
   server-thread:
     name: server-main-imports-then-webrtc-thread
