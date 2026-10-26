@@ -208,6 +208,7 @@ Notas para la nube:
 - **WebRTC remoto:** la app detecta el host público y selecciona *Internet / NAT*; si no hay TURN propio, deja activado el TURN público de respaldo. Para una demo estable, configura Metered, Twilio o un coturn propio.
 - **CORS/XSRF:** no los desactives. `streamlit-webrtc` 0.79 no los necesita y Streamlit Cloud mantiene la seguridad por defecto.
 - **Recursos:** el plan gratuito tiene 1 GB de RAM. TensorFlow CPU y una sesión WebRTC pueden ser justos; usa 480×360 o 320×240 y una sola sesión durante la demo.
+- **Dependencias fijadas:** `requirements.txt` usa versiones exactas validadas con Python 3.12 (`streamlit==1.62.0`, `pyarrow==24.0.0`, `numpy==2.5.2`, `pandas==3.0.5`). No las cambies a rangos abiertos: una resolución reciente instaló `numpy 2.5.4`/`pandas 3.1.0`/`streamlit 1.66.1` y provocó `Segmentation fault` al iniciar. Si actualizas, valida el arranque completo antes de desplegar.
 
 #### Solución de problemas rápidos
 - **La cámara no abre en el celular:** la URL debe ser `https://`; acepta el certificado y vuelve a pulsar START.
@@ -215,6 +216,7 @@ Notas para la nube:
 - **No suena la alarma:** haz al menos un clic/toque en la página para desbloquear el audio del navegador y confirma el toggle **Activar Alarma Sonora**.
 - **No aparece la IP correcta:** la barra lateral lista la IP principal y otras interfaces; prueba la que corresponda a tu WiFi. Si la IP cambió, regenera el certificado con `python tools/generate_cert.py --force`.
 - **En Streamlit Cloud falla la instalación de TensorFlow:** verifica que la app esté usando **Python 3.12** en Advanced settings; no dependas de `runtime.txt`.
+- **Segmentation fault en Streamlit Cloud al iniciar:** no cambies `requirements.txt` a rangos `>=`; mantén las versiones fijadas y confirma en los logs que se instalaron exactamente. `app.py` activa `faulthandler` para dejar un traceback en el log si el fallo nativo vuelve a ocurrir.
 - **En Streamlit Cloud WebRTC queda en “connecting”:** configura `TURN_URL`, `TURN_USERNAME` y `TURN_PASSWORD` en Secrets. STUN por sí solo no atraviesa todos los NAT móviles.
 - **La pestaña del dataset está vacía en la nube:** es esperado; el dataset no se versiona. Usa el modo WebRTC o sube una imagen local.
 

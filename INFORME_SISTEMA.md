@@ -140,7 +140,7 @@ El sistema de producción opera bajo una arquitectura de flujo continuo dividido
 
 #### Despliegue en Streamlit Community Cloud
 
-El despliegue en la nube reutiliza el mismo código con tres adaptaciones: (1) TLS lo termina la plataforma, por lo que no se usan los certificados locales; (2) la app detecta que el host es público y selecciona **Internet/NAT** por defecto, añadiendo STUN y TURN; (3) el dataset DDD no se versiona, pero el modelo, las métricas, `alarm.wav` y el modo WebRTC sí están disponibles. Las credenciales TURN se inyectan mediante *Secrets* y el entorno se fija en Python 3.12. La alarma sigue ejecutándose exclusivamente en el navegador.
+El despliegue en la nube reutiliza el mismo código con tres adaptaciones: (1) TLS lo termina la plataforma, por lo que no se usan los certificados locales; (2) la app detecta que el host es público y selecciona **Internet/NAT** por defecto, añadiendo STUN y TURN; (3) el dataset DDD no se versiona, pero el modelo, las métricas, `alarm.wav` y el modo WebRTC sí están disponibles. Las credenciales TURN se inyectan mediante *Secrets* y el entorno se fija en Python 3.12. La alarma sigue ejecutándose exclusivamente en el navegador. Para evitar fallos nativos por incompatibilidad ABI, `requirements.txt` fija versiones exactas validadas en local (`streamlit==1.62.0`, `pyarrow==24.0.0`, `numpy==2.5.2`, `pandas==3.0.5`, entre otras); no deben reemplazarse por rangos abiertos sin repetir el despliegue de prueba.
 
 ---
 

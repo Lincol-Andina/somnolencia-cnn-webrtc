@@ -6,6 +6,7 @@ Sprint 2 - Visión por Computadora & Deep Learning
 =============================================================================
 """
 
+import faulthandler
 import os
 import sys
 import json
@@ -15,6 +16,8 @@ import random
 import ipaddress
 import threading
 from pathlib import Path
+
+faulthandler.enable()
 
 # Configuración de codificación para consolas Windows
 if sys.platform == "win32":
