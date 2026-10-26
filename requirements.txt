@@ -24,12 +24,14 @@ pyarrow==24.0.0
 
 # Video en vivo desde el navegador/celular (WebRTC)
 # aiortc 1.15 exige av<18; no subir a av 18/19 porque rompe la resolución.
-# pylibsrtp 1.0.0 provoca Segmentation fault al importar en Streamlit Cloud;
-# 0.12.0 cumple aiortc>=0.10.0 y tiene wheels Linux/Windows.
+# Los wheels Linux de pylibsrtp incluyen OpenSSL estático y exportan sus
+# símbolos globalmente. En Streamlit Cloud eso produce SIGSEGV al importar
+# pylibsrtp desde el hilo del script si el servidor ya cargó pyarrow.
+# Se instala el sdist para enlazar dinámicamente libsrtp2/libcrypto del sistema.
 streamlit-webrtc==0.79.0
 aiortc==1.15.0
 av==17.1.0
-pylibsrtp==0.12.0
+pylibsrtp @ https://files.pythonhosted.org/packages/54/c8/a59e61f5dd655f5f21033bd643dd31fe980a537ed6f373cdfb49d3a3bd32/pylibsrtp-0.12.0.tar.gz
 
 # Generación del certificado HTTPS autofirmado (tools/generate_cert.py)
 cryptography==50.0.2
