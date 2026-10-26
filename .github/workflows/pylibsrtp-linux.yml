@@ -28,11 +28,37 @@ jobs:
     container: python:3.12-slim-trixie
     steps:
       - uses: actions/checkout@v4
-      - run: apt-get update && apt-get install -y --no-install-recommends gcc libsrtp2-dev libssl-dev pkg-config
-      - run: pip install --no-cache-dir --no-binary=pylibsrtp "pylibsrtp==0.12.0"
+      - run: apt-get update && apt-get install -y --no-install-recommends gcc libsrtp2-dev libssl-dev pkg-config binutils
+      - run: dpkg -l libsrtp2-dev libssl-dev; ls -l /usr/include/srtp2/srtp.h
+      - name: build-from-source
+        run: |
+          set +e
+          pip install --no-cache-dir --no-binary=pylibsrtp "pylibsrtp==0.12.0" -v > /tmp/pip.log 2>&1
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            tail -n 40 /tmp/pip.log | while IFS= read -r line; do echo "::error title=pip-log::$line"; done
+            cat /tmp/pip.log
+            exit "$rc"
+          fi
       - run: python -c "import pylibsrtp; print('OK', pylibsrtp.__version__)"
-      - run: pip install --no-cache-dir "aiortc==1.15.0"
+      - run: ldd "$(python -c 'import pylibsrtp._binding as m; print(m.__file__)')"
+      - run: readelf -d "$(python -c 'import pylibsrtp._binding as m; print(m.__file__)')" | grep NEEDED
+      - run: pip install --no-cache-dir "aiortc==1.15.0" "streamlit==1.62.0" "pyarrow==24.0.0" "pandas==3.0.5"
       - run: python -c "import aiortc; print('aiortc OK', aiortc.__version__)"
+      - name: pyarrow-main-then-pylibsrtp-thread
+        run: python -c "import faulthandler, threading, pyarrow, streamlit, pandas; faulthandler.enable(); t=threading.Thread(target=lambda: (__import__('pylibsrtp'), print('OK pyarrow-main-srtp-thread', flush=True))); t.start(); t.join()"
+
+  server-thread:
+    name: server-main-imports-then-webrtc-thread
+    runs-on: ubuntu-latest
+    container: python:3.12-slim-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
+      - run: pip install --no-cache-dir -r requirements.txt
+      - name: server-main-then-script-thread
+        run: python diagnostics/main_imports_thread_webrtc.py
+        timeout-minutes: 5
 
   app-imports:
     name: app-import-order
