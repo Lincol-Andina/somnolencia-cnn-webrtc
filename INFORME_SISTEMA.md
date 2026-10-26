@@ -2,8 +2,8 @@
 
 **Proyecto:** Sprint 2 — Deep Learning y Visión Artificial Aplicada a la Seguridad Vial  
 **Autor:** Especialista en Deep Learning y Visión por Computadora  
-**Entorno de Ejecución:** Python 3.13 / TensorFlow 2.21 / Keras 3.15 / OpenCV / Streamlit  
-**Fecha:** Octubre 2026  
+**Entorno de Ejecución:** Python 3.12.10 / TensorFlow 2.21 / Keras 3.15 / OpenCV / Streamlit 1.62 / streamlit-webrtc 0.79<br>
+**Fecha:** Octubre 2026
 
 ---
 
@@ -25,11 +25,11 @@ Frente a este escenario, los sistemas avanzados de asistencia a la conducción (
 Las metas fundamentales trazadas para este prototipo son:
 1. **Detección No Invasiva Basada en Visión Artificial:** Capturar la morfología y postura del rostro del operador mediante una cámara convencional en el espectro visible (RGB), evitando el uso de sensores corporales invasivos (como bandas encefalográficas EEG o sensores galvánicos en la piel) que provocan incomodidad y rechazo en el usuario.
 2. **Diseño de una Red Neuronal Convolucional (CNN) de 3 Ciclos Convolucionales:** Estructurar una topología secuencial profunda optimizada que capture tanto rasgos transicionales/locales como información espacial de alto nivel (apertura palpebral, comisuras labiales, inclinación cefálica), desacoplando las operaciones mediante convoluciones separables para garantizar una inferencia inferior a 15 ms en procesadores de propósito general (CPU).
-3. **Mecanismo de Alerta Temprana Bimodal (Acústica y Visual):** Integrar un buffer temporal de consistencia para discriminar el parpadeo natural respecto a episodios de hipovigilancia sostenida, disparando alarmas sonoras penetrantes en segundo plano para forzar la reactivación cognitiva inmediata del conductor.
+3. **Mecanismo de Alerta Temprana Bimodal (Acústica y Visual):** Integrar un buffer temporal de consistencia para discriminar el parpadeo natural respecto a episodios de hipovigilancia sostenida, activando una alarma visual en el HUD y una alarma sonora reproducida en el navegador del usuario mediante Web Audio API.
 
 ---
 
-### 1.2. Alcance del Proyecto: Desarrollo y validación de un MVP funcional en laptop desplegado en Streamlit
+### 1.2. Alcance del Proyecto: Desarrollo y validación de un MVP funcional desplegable en local o en Streamlit Community Cloud
 
 El proyecto abarca el ciclo de vida completo de un Producto Mínimo Viable (MVP) operativo de nivel industrial y académico:
 
@@ -37,8 +37,8 @@ El proyecto abarca el ciclo de vida completo de un Producto Mínimo Viable (MVP)
 2. **Modelado y Experimentación:** Entrenamiento supervisado de la CNN de 3 ciclos, incorporando técnicas de regularización estocástica (*Dropout*) y estabilización de gradientes (*Batch Normalization*), junto a políticas de aprendizaje adaptativo (*EarlyStopping*, *ReduceLROnPlateau*).
 3. **Evaluación Rigurosa y Métricas de Seguridad Crítica:** Análisis de rendimiento sobre un conjunto de prueba independiente mediante matrices de confusión normalizadas, curvas ROC/AUC y reportes detallados de precisión, recall y F1-score, enfatizando la minimización de falsos negativos (FN).
 4. **Despliegue Web Interactivo en Streamlit:** Empaquetamiento modular en una aplicación web interactiva (`app.py`) estructurada en tres pestañas:
-   - *Pestaña 1 (MVP en Vivo):* Captura de video en tiempo real mediante OpenCV (`cv2.VideoCapture`), overlay gráfico tipo HUD (*Heads-Up Display*), inferencia continua y disparo acústico no bloqueante en subprocesos independientes. Incluye además modos de evaluación por subida de imágenes y muestreo aleatorio directo del dataset.
-   - *Pestaña 2 (Métricas del Modelo):* Panel visual interactivo que renderiza curvas ROC, matrices de confusión, curvas de pérdida/precisión y tablas de reporte para auditoría técnica.
+   - *Pestaña 1 (MVP en Vivo):* Transmisión de video desde la cámara del celular o navegador mediante **WebRTC** (`streamlit-webrtc` + `aiortc`), overlay gráfico tipo HUD (*Heads-Up Display*), inferencia continua en el servidor y devolución del video anotado. La alarma se reproduce en el navegador con **Web Audio API**; el servidor no emite audio. Incluye modos de evaluación por subida de imágenes y muestreo aleatorio del dataset, además de un modo de red **LAN sin internet** y otro **Internet/NAT con STUN/TURN**. El despliegue remoto en Streamlit Community Cloud usa HTTPS de la plataforma y TURN configurado por *Secrets*.
+   - *Pestaña 2 (Métricas del Modelo):* Panel visual interactivo que renderiza curvas ROC, matrices de confusión, curvas de pérdida/precisión y tablas de reporte para auditoría técnica, calculadas dinámicamente desde `metrics.json`.
    - *Pestaña 3 (Módulo Didáctico y Académico):* Desglose metodológico pormenorizado de las capas de la red, glosario técnico con fundamentación matemática y tabla de parámetros.
 
 ---
@@ -107,31 +107,40 @@ Para la ingesta eficiente en disco se implementó:
 
 ### 3.1. Flujo General de la Aplicación: Captura de video en tiempo real, análisis frame a frame y disparo de alarma sonora
 
-El sistema de producción opera bajo una arquitectura de flujo continuo dividido en cuatro subestaciones sincronizadas:
+El sistema de producción opera bajo una arquitectura de flujo continuo dividido en subestaciones sincronizadas. El video ya no se captura con `cv2.VideoCapture` en el servidor: se origina en el navegador del usuario (celular o laptop), viaja por WebRTC y regresa anotado.
 
 ```text
-[ CÁMARA WEB ] ➔ (30 FPS, BGR)
+[ CÁMARA DEL CELULAR / NAVEGADOR ] ➔ getUserMedia (HTTPS en móvil)
+       │  video WebRTC (H.264/VP8 según navegador)
+       ▼
+[ STREAMLIT + aiortc ] ➔ callback frame a frame (hilo de WebRTC)
        │
        ▼
-[ PREPROCESAMIENTO ] ➔ BGR a RGB, Resize (64, 64, 3), Batch Tensor
+[ PREPROCESAMIENTO ] ➔ BGR a RGB, Resize (64, 64, 3), tensor (1, 64, 64, 3)
        │
        ▼
 [ INFERENCIA CNN ] ➔ model_ddd.keras ➔ P(Somnoliento) ∈ [0.0, 1.0]
        │
        ▼
-[ FILTRO TEMPORAL ] ➔ ¿P ≥ 0.50 sostenido por N ≥ 10 frames consecutivos?
-      ├── NO ──> Estado "Alerta / Despierto" (HUD Verde)
-      └── SÍ ──> Estado "¡SOMNOLENCIA DETECTADA!" (HUD Rojo)
-                     └──> Disparo de Alarma Sonora Asíncrona (Hilo Secundario)
+[ ESTADO LIVE THREAD-SAFE ] ➔ buffer temporal, FPS, event_id
+       ├── Video anotado ➔ regresa al navegador por WebRTC
+       └── Marcador #ddd-alarm-signal ➔ Web Audio API (navegador)
 ```
 
-1. **Adquisición de Señal de Video:** Mediante la interfaz `cv2.VideoCapture`, la cámara web de la computadora captura fotogramas continuos en formato BGR a una frecuencia nominal de 30 fotogramas por segundo (FPS).
-2. **Transformación Tensorial:** Cada fotograma capturado se transforma a espacio RGB, se remuestrea a $(64, 64, 3)$ y se añade la dimensión de lote mediante `np.expand_dims`, generando un tensor de forma $(1, 64, 64, 3)$.
-3. **Inferencia Feed-Forward:** El tensor se inyecta en el modelo `model_ddd.keras` precompilado en memoria RAM a través del decorador `@st.cache_resource`, generando la probabilidad escalar $P(\text{Somnoliento} \mid \text{Frame}) = \hat{y} \in [0, 1]$.
-4. **Acumulador Temporal de Estados y Alarma Acústica:** Un parpadeo biológico involuntario tiene una duración típica de 100 a 400 milisegundos (equivalente a 3 a 12 cuadros a 30 FPS). Disparar una alarma ante un solo fotograma con ojos cerrados induciría una saturación de falsas alarmas que inutilizaría el sistema. Por ende, se implementó un **acumulador temporal**:
-   - Si $\hat{y} \ge \tau$ (donde $\tau = 0.50$ es el umbral de decisión), el contador de persistencia se incrementa: $C_{t} = C_{t-1} + 1$.
+1. **Adquisición y Transporte de Video:** El navegador captura la cámara con `getUserMedia` y la envía al servidor mediante el componente `webrtc_streamer` en modo `SENDRECV`. En celulares, el navegador exige **HTTPS** para habilitar la cámara; por ello se incluye `tools/generate_cert.py`, que genera un certificado autofirmado con la IP LAN en el campo SAN.
+2. **Preprocesamiento y Transformación Tensorial:** En `build_video_callback()` cada `av.VideoFrame` se convierte a BGR con `to_ndarray(format="bgr24")`, se transforma a RGB, se remuestrea a $(64, 64, 3)$ y se añade la dimensión de lote, generando un tensor $(1, 64, 64, 3)$.
+3. **Inferencia Feed-Forward Thread-Safe:** El tensor se inyecta en el modelo `model_ddd.keras`, cargado una sola vez con `@st.cache_resource`. La función `predict_prob()` serializa el acceso al modelo con `MODEL_LOCK`, permitiendo varias sesiones concurrentes sin corromper el grafo de Keras. El resultado es $P(\text{Somnoliento} \mid \text{Frame}) = \hat{y} \in [0, 1]$.
+4. **Acumulador Temporal de Estados:** Un parpadeo biológico dura típicamente entre 100 y 400 ms. Para evitar falsas alarmas, `LiveState` implementa un acumulador con umbral $\tau$ y ventana $N$ configurables:
+   - Si $\hat{y} \ge \tau$, el contador se incrementa: $C_{t} = C_{t-1} + 1$.
    - Si $\hat{y} < \tau$, el contador se decrementa gradualmente: $C_{t} = \max(0, C_{t-1} - 1)$.
-   - Cuando $C_{t} \ge N_{\text{alarma}}$ (donde $N_{\text{alarma}} = 10$ cuadros consecutivos, equivalente a $\approx 330$ ms sostenidos de somnolencia), se invoca un hilo independiente (`threading.Thread(target=play_alarm_audio, daemon=True)`) que ejecuta un tono agudo y penetrante de advertencia ($2500\text{ Hz}$ durante $280\text{ ms}$) mediante `winsound.Beep` en Windows o `pygame.mixer` como contingencia. La ejecución en un hilo secundario garantiza que el flujo de video en pantalla nunca sufra congelamientos o caídas de tasa de refresco.
+   - La alarma se activa cuando $C_{t} \ge N_{\text{alarma}}$ (por defecto 10 cuadros). En cada transición de inactiva a activa se incrementa un `event_id`, lo que permite al navegador distinguir eventos nuevos.
+5. **Alarma Sonora en el Navegador:** El servidor solo publica un marcador HTML oculto (`render_alarm_signal`) con los atributos `data-active`, `data-sound` y `data-event`. Un runtime JavaScript inyectado al inicio de la app consulta ese marcador cada 250 ms y reproduce `alarm.wav` (embebido en base64) con **Web Audio API**, repitiendo el tono cada segundo mientras la alerta persista. Si el WAV no puede decodificarse, usa un oscilador de respaldo. El audio se desbloquea con el primer clic, toque o tecla del usuario. No se usa `winsound`, `pygame` ni audio del servidor.
+6. **Renderizado y Telemetría:** El frame anotado retorna al navegador por el mismo track WebRTC. La telemetría (probabilidad, FPS estimado, contador y estado) se refresca con un `@st.fragment(run_every=0.25)` que lee una instantánea de `LiveState`, sin reiniciar el stream.
+7. **Modos de Red Offline-First:** En **LAN** la configuración ICE queda vacía (`iceServers: []`), por lo que se usan únicamente candidatos host y no se contacta ningún servidor externo; funciona en la misma WiFi incluso sin internet. En **Internet/NAT** se añaden STUN y, opcionalmente, TURN configurado por variables de entorno o `st.secrets` (`TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD`) o un TURN público de respaldo. La app no carga fuentes, CDN ni recursos remotos.
+
+#### Despliegue en Streamlit Community Cloud
+
+El despliegue en la nube reutiliza el mismo código con tres adaptaciones: (1) TLS lo termina la plataforma, por lo que no se usan los certificados locales; (2) la app detecta que el host es público y selecciona **Internet/NAT** por defecto, añadiendo STUN y TURN; (3) el dataset DDD no se versiona, pero el modelo, las métricas, `alarm.wav` y el modo WebRTC sí están disponibles. Las credenciales TURN se inyectan mediante *Secrets* y el entorno se fija en Python 3.12. La alarma sigue ejecutándose exclusivamente en el navegador.
 
 ---
 
@@ -221,12 +230,13 @@ A continuación se detalla exhaustivamente cada una de las 6 fases que componen 
 
 La aplicación web desarrollada en **Streamlit** (`app.py`) fue construida con estándares de ingeniería de software y diseño UI/UX de vanguardia:
 
-1. **Diseño Visual y Glassmorphism:** Interfaz estilizada mediante CSS nativo con paleta oscura (*dark theme*), tipografía moderna (*Outfit* y *JetBrains Mono*) y tarjetas translucidas con desenfoque de fondo (*backdrop-filter*).
+1. **Diseño Visual y Glassmorphism Offline-First:** Interfaz estilizada mediante CSS nativo con paleta oscura (*dark theme*), tipografías del sistema (`Segoe UI`, `system-ui`, `Cascadia Code`, `Consolas`) y tarjetas translúcidas con desenfoque de fondo (*backdrop-filter*). No se cargan fuentes ni recursos externos, por lo que la apariencia se mantiene sin internet.
 2. **Sistema de Pestañas Modulares:**
-   - **Pestaña 1 (MVP en Tiempo Real):** Panel de mando para el conductor y evaluadores. Incluye control deslizante para calibrar el umbral $\tau$ (de 0.10 a 0.90), ajuste del buffer de persistencia de alarma (de 3 a 30 cuadros), selector de hardware de video y visor interactivo del flujo de fotogramas anotados con rectángulos de estado y textos dinámicos en OpenCV.
-   - **Pestaña 2 (Métricas Experimentales):** Tablero analítico que carga y parsea el archivo `metrics.json`, generando visualizaciones comparativas de curvas ROC, matrices de confusión y tablas estructuradas de clasificación.
+   - **Pestaña 1 (MVP en Tiempo Real):** Panel de mando para el conductor y evaluadores. Incluye control deslizante para calibrar el umbral $\tau$ (de 0.10 a 0.90), ajuste del buffer de persistencia de alarma (de 3 a 30 cuadros), selector de red (LAN/Internet), cámara frontal/trasera, resolución, FPS objetivo y botón de prueba de alarma. El visor WebRTC muestra el video anotado con HUD y telemetría en vivo.
+   - **Pestaña 2 (Métricas Experimentales):** Tablero analítico que carga y parsea `metrics.json`, generando visualizaciones comparativas de curvas ROC, matrices de confusión y tablas estructuradas de clasificación. Los textos interpretativos usan los valores reales del archivo, no cifras fijas.
    - **Pestaña 3 (Sección Académica):** Entorno explicativo que desglosa conceptualmente las capas de la red, los fundamentos del aprendizaje profundo en visión artificial y las ventajas operativas de la convolución separable.
-3. **Modos de Contingencia:** Para pruebas en entornos sin cámara web física, la aplicación incorpora un cargador de archivos de imagen (`.jpg`, `.png`) y un evaluador con muestras aleatorias del dataset DDD que permite auditar la inferencia con un solo clic.
+3. **Modos de Contingencia:** Para pruebas en entornos sin cámara, la aplicación incorpora un cargador de archivos de imagen (`.jpg`, `.png`) y un evaluador con muestras aleatorias del dataset DDD que permite auditar la inferencia con un solo clic. Ambos modos también disparan la alarma en el navegador.
+4. **Despliegue en Red Local:** La barra lateral detecta y muestra la IP LAN principal y otras interfaces. Con `--server.sslCertFile`/`--server.sslKeyFile` la app se sirve por HTTPS, requisito para la cámara en celulares. En modo LAN no se contactan servidores ICE externos.
 
 ---
 
@@ -237,13 +247,17 @@ La aplicación web desarrollada en **Streamlit** (`app.py`) fue construida con e
 El entrenamiento del modelo se ejecutó utilizando el optimizador estocástico **Adam** ($\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-7}$) sobre minilotes de tamaño 64 con la función de pérdida de entropía cruzada binaria (*Binary Crossentropy*):
 $$\mathcal{L}(y, \hat{y}) = - \frac{1}{N} \sum_{i=1}^N \left[ y_i \log(\hat{y}_i) + (1 - y_i) \log(1 - \hat{y}_i) \right]$$
 
-La evolución del proceso durante las épocas evidenció una convergencia progresiva y sólida:
-- **Época 1:** Pérdida de entrenamiento inicial de $0.6284$ con exactitud de $64.75\%$; validación en $67.71\%$ ($loss = 0.6530$).
-- **Época 2 a 4:** Rápido descenso de la función de coste. La exactitud de entrenamiento escaló progresivamente al $79.80\%$, $83.91\%$ y $88.69\%$. La normalización por lotes aseguró que no ocurrieran explosiones de gradiente.
-- **Época 6:** El modelo alcanzó su mejor punto de generalización:
-  - **Pérdida en Entrenamiento:** $0.2042$ | **Exactitud en Entrenamiento:** $91.89\%$
-  - **Pérdida en Validación:** $0.3515$ | **Exactitud en Validación:** $86.11\%$
-- **Tiempo Total de Cómputo:** 168.48 segundos en CPU (~2.81 minutos), demostrando la eficiencia de la arquitectura propuesta.
+El reentrenamiento final se ejecutó con el **dataset completo** (41,793 imágenes), 15 épocas, minilotes de 64 y la misma función de pérdida. La evolución evidenció una convergencia progresiva y sólida:
+- **Época 1:** Pérdida de entrenamiento inicial de $0.3724$ con exactitud de $83.48\%$; validación en $62.37\%$ ($loss = 0.8722$).
+- **Épocas 2 a 4:** Descenso acelerado de la pérdida. La exactitud de entrenamiento escaló a $95.42\%$, $96.88\%$ y $97.79\%$. La validación mostró oscilaciones transitorias ($68.46\%$, $97.35\%$, $88.11\%$) asociadas a la tasa de aprendizaje y al tamaño del conjunto, sin explosiones de gradiente gracias a `BatchNormalization`.
+- **Épocas 5 a 12:** Estabilización progresiva. La exactitud de validación se mantuvo por encima del $95\%$ y la pérdida descendió a valores inferiores a $0.02$.
+- **Época 13 (mejor generalización):**
+  - **Pérdida en Entrenamiento:** $0.0106$ | **Exactitud en Entrenamiento:** $99.59\%$
+  - **Pérdida en Validación:** $0.0065$ | **Exactitud en Validación:** $99.68\%$
+- **Época 15 (cierre):**
+  - **Pérdida en Entrenamiento:** $0.0100$ | **Exactitud en Entrenamiento:** $99.61\%$
+  - **Pérdida en Validación:** $0.0094$ | **Exactitud en Validación:** $99.59\%$
+- **Tiempo Total de Cómputo:** **1,193.73 segundos** (~19.9 minutos) en CPU, procesando el corpus completo sin GPU.
 
 [Insertar imagen de: Curvas de Precisión y Pérdida por Época (Train vs Val)]
 
@@ -251,26 +265,28 @@ La evolución del proceso durante las épocas evidenció una convergencia progre
 
 ### 4.2. Rendimiento Global del Modelo: Cuadro resumen de métricas clave
 
-Para certificar la capacidad de generalización del sistema en condiciones reales, se llevó a cabo una evaluación ciega sobre el conjunto de prueba independiente integrado por **1,152 imágenes** (542 correspondientes a `Non Drowsy` y 610 a `Drowsy`).
+Para certificar la capacidad de generalización del sistema se llevó a cabo una evaluación ciega sobre el conjunto de prueba independiente integrado por **6,265 imágenes** (2,899 correspondientes a `Non Drowsy` y 3,366 a `Drowsy`).
 
 A continuación se detalla el cuadro consolidado de métricas obtenidas:
 
 | Métrica de Desempeño | Valor Numérico | Interpretación Operativa |
 | :--- | :---: | :--- |
-| **Exactitud Global (Accuracy)** | **86.46%** | De 1,152 evaluaciones de prueba, 996 fueron clasificadas con total certeza. |
-| **Área bajo la Curva ROC (AUC)** | **0.9486** | Cercana a 0.95, ratifica una separación casi óptima entre las distribuciones de probabilidad de ambas clases. |
-| **Sensibilidad / Recall (Clase Drowsy)** | **96.56%** | **Métrica más crítica:** El sistema detecta con éxito a 96.56 de cada 100 conductores somnolientos. |
-| **Precisión (Clase Drowsy)** | **81.35%** | El 81.35% de las detecciones catalogadas como somnolencia son correctas. |
-| **F1-Score (Clase Drowsy)** | **0.8831** | Media armónica que ratifica un equilibrio de alto nivel entre precisión y sensibilidad. |
-| **F1-Score Macro Promedio** | **0.8611** | Rendimiento equilibrado y simétrico entre conductores despiertos y fatigados. |
+| **Exactitud Global (Accuracy)** | **99.60%** | De 6,265 evaluaciones de prueba, 6,240 fueron clasificadas correctamente. |
+| **Área bajo la Curva ROC (AUC)** | **1.0000** | Separación perfecta entre las distribuciones de probabilidad en este conjunto de prueba. |
+| **Sensibilidad / Recall (Clase Drowsy)** | **99.88%** | **Métrica más crítica:** El sistema detecta con éxito a 99.88 de cada 100 conductores somnolientos. |
+| **Precisión (Clase Drowsy)** | **99.38%** | El 99.38% de las detecciones catalogadas como somnolencia son correctas. |
+| **F1-Score (Clase Drowsy)** | **0.9963** | Media armónica que ratifica un equilibrio de alto nivel entre precisión y sensibilidad. |
+| **F1-Score Macro Promedio** | **0.9960** | Rendimiento equilibrado y simétrico entre conductores despiertos y fatigados. |
 
 A nivel desagregado por clase, el reporte formal emitido por Scikit-Learn confirma:
 
 | Clase Evaluada | Precisión | Recall (Sensibilidad) | F1-Score | Soporte (Imágenes Reales) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Non Drowsy (Despierto / Alerta)** | 0.9509 (95.09%) | 0.7509 (75.09%) | 0.8392 | 542 |
-| **Drowsy (Somnoliento / Fatiga)** | 0.8135 (81.35%) | **0.9656 (96.56%)** | **0.8831** | 610 |
-| **Promedio Ponderado (Weighted Avg)** | 0.8782 (87.82%) | 0.8646 (86.46%) | 0.8624 | 1,152 |
+| **Non Drowsy (Despierto / Alerta)** | 0.9986 (99.86%) | 0.9928 (99.28%) | 0.9957 | 2,899 |
+| **Drowsy (Somnoliento / Fatiga)** | 0.9938 (99.38%) | **0.9988 (99.88%)** | **0.9963** | 3,366 |
+| **Promedio Ponderado (Weighted Avg)** | 0.9960 (99.60%) | 0.9960 (99.60%) | 0.9960 | 6,265 |
+
+> **Nota metodológica:** la partición se realizó de forma aleatoria sobre el corpus. Dado que el DDD contiene frames extraídos de video, es posible que existan muestras casi duplicadas entre entrenamiento y prueba, lo que puede inflar las métricas. Para certificar la generalización real se requiere una validación externa con sujetos, cámaras e iluminación no vistos.
 
 [Insertar imagen de: Reporte de Clasificación Detallado]
 
@@ -280,10 +296,12 @@ A nivel desagregado por clase, el reporte formal emitido por Scikit-Learn confir
 
 La curva ROC (*Receiver Operating Characteristic*) mapea la Tasa de Verdaderos Positivos (TPR o Recall) frente a la Tasa de Falsos Positivos (FPR) para todos los umbrales de decisión posibles entre 0.0 y 1.0.
 
-El área bajo la curva obtenida por la red es de **$\text{AUC} = 0.9486$**, lo que califica al modelo en un rango de excelencia discriminativa:
-- Comparado con una línea base aleatoria ($\text{AUC} = 0.5000$), la curva del sistema asciende de forma casi vertical en los umbrales iniciales.
-- A una tasa de falsos positivos sumamente baja ($\text{FPR} \approx 0.10$), el modelo captura más del **$91\%$** de los casos reales de somnolencia.
-- Esto significa que la red asigna sistemáticamente una probabilidad predicha más alta a una muestra aleatoria de un conductor somnoliento que a la de un conductor despierto en el **94.86% de las ocasiones**.
+El área bajo la curva obtenida por la red es de **$\text{AUC} = 1.0000$**, lo que indica una separación perfecta en este conjunto de prueba:
+- Comparado con una línea base aleatoria ($\text{AUC} = 0.5000$), la curva del sistema asciende de forma prácticamente vertical en los umbrales iniciales.
+- Con una tasa de falsos positivos de aproximadamente **$1\%$** ($\text{FPR} \approx 0.01$), el modelo captura cerca del **$99.8\%$** de los casos reales de somnolencia.
+- Esto significa que, en este conjunto de prueba, la red asigna una probabilidad de fatiga más alta al conductor somnoliento que al despierto en prácticamente el **100% de las comparaciones aleatorias**.
+
+> Un AUC exacto de 1.0000 debe interpretarse como un resultado sobre este split específico; la validación con datos externos, otras cámaras e iluminación real sigue siendo necesaria antes de un despliegue comercial.
 
 [Insertar imagen de: Curva ROC vs Clasificador Aleatorio]
 
@@ -295,27 +313,27 @@ El análisis pormenorizado de la matriz de confusión revela la naturaleza de la
 
 ```text
 ===================================================================
-MATRIZ DE CONFUSIÓN ABSOLUTA (N = 1,152 imágenes de prueba)
+MATRIZ DE CONFUSIÓN ABSOLUTA (N = 6,265 imágenes de prueba)
 ===================================================================
                         Predicción Modelo
                       Non Drowsy       Drowsy
 Etiqueta Real  ───────────────────────────────────
-Non Drowsy (542)   │     407 (TN)     135 (FP)    │  (Total: 542)
-Drowsy (610)       │      21 (FN)     589 (TP)    │  (Total: 610)
+Non Drowsy (2,899) │    2,878 (TN)      21 (FP)   │  (Total: 2,899)
+Drowsy (3,366)     │        4 (FN)   3,362 (TP)   │  (Total: 3,366)
 ===================================================================
 
 MATRIZ DE CONFUSIÓN NORMALIZADA POR FILA (Ground Truth)
 ===================================================================
-Non Drowsy Real:   75.09% Aciertos (TN)  │  24.91% Falsas Alarmas (FP)
-Drowsy Real:        3.44% No Detectados   │  96.56% Aciertos (TP)
+Non Drowsy Real:   99.28% Aciertos (TN)  │   0.72% Falsas Alarmas (FP)
+Drowsy Real:        0.12% No Detectados   │  99.88% Aciertos (TP)
 ===================================================================
 ```
 
 #### Interpretación Crítica en Seguridad Vial:
-1. **Minimización Extrema de Falsos Negativos (FN = 3.44%):** 
-   En sistemas de protección vehicular clasificados bajo normas funcionales de seguridad (como ISO 26262), el coste de un Falso Negativo (un conductor dormido que el sistema cataloga como despierto) es infinitamente mayor que el de un Falso Positivo. De 610 conductores somnolientos evaluados, el modelo **solo omitió 21 casos**, alcanzando una efectividad de detección del **96.56%**.
-2. **Análisis de Falsos Positivos (FP = 24.91%):**
-   De los 542 conductores despiertos, 135 fueron etiquetados transitoriamente como somnolientos. La inspección visual cualitativa demostró que estos casos corresponden principalmente a:
+1. **Minimización Extrema de Falsos Negativos (FN = 0.12%):**
+   En sistemas de protección vehicular clasificados bajo normas funcionales de seguridad (como ISO 26262), el coste de un Falso Negativo (un conductor dormido que el sistema cataloga como despierto) es infinitamente mayor que el de un Falso Positivo. De 3,366 conductores somnolientos evaluados, el modelo **solo omitió 4 casos**, alcanzando una efectividad de detección del **99.88%**.
+2. **Análisis de Falsos Positivos (FP = 0.72%):**
+   De los 2,899 conductores despiertos, solo 21 fueron etiquetados transitoriamente como somnolientos. Estos casos suelen corresponder a:
    - Sujetos con ojos rasgados o cejas muy pobladas que proyectan sombras densas sobre la cavidad ocular bajo iluminación cenital.
    - Fotogramas capturados en el instante intermedio exacto de un parpadeo natural.
    - Gestos faciales de risa o concentración donde los ojos se entrecierran momentáneamente.
@@ -329,10 +347,12 @@ Drowsy Real:        3.44% No Detectados   │  96.56% Aciertos (TP)
 ## 5. Conclusiones y Recomendaciones
 
 ### 5.1. Conclusiones
-1. **Viabilidad de la Arquitectura de 3 Ciclos:** Se comprobó que una red profunda compacta de 3 ciclos convolucionales estructurada con capas `Conv2D`, `BatchNormalization`, `MaxPooling2D`, `Dropout`, `SeparableConv2D` y `GlobalAveragePooling2D` es plenamente capaz de resolver la detección de somnolencia con un **AUC de 0.9486** y exactitud global de **86.46%**, consumiendo únicamente **36,737 parámetros** (un peso en disco de apenas ~495 KB).
-2. **Priorización de la Seguridad Humana:** El sistema alcanzó un **Recall del 96.56%** en la clase somnolienta, asegurando que prácticamente la totalidad de los episodios de fatiga sean identificados con celeridad antes de transformarse en colisiones viales.
-3. **Eficiencia en Tiempo Real:** La incorporación de la convolución separable en profundidad redujo los requerimientos de cálculo en más de un 88%, haciendo viable el procesamiento continuo a 30 FPS en procesadores de computadoras portátiles comunes sin dependencia de aceleración por GPU.
-4. **Empaquetamiento Exitoso:** La integración en Streamlit proporciona una plataforma no solo apta para demostraciones de Producto Mínimo Viable (MVP) y auditorías técnicas, sino también para entornos educativos y académicos gracias a su sección interactiva de telemetría y documentación.
+1. **Viabilidad de la Arquitectura de 3 Ciclos:** Se comprobó que una red profunda compacta de 3 ciclos convolucionales estructurada con capas `Conv2D`, `BatchNormalization`, `MaxPooling2D`, `Dropout`, `SeparableConv2D` y `GlobalAveragePooling2D` es plenamente capaz de resolver la detección de somnolencia con un **AUC de 1.0000**, exactitud global de **99.60%** y **Recall de 99.88%**, consumiendo únicamente **36,737 parámetros** (modelo final de ~495 KB en disco).
+2. **Priorización de la Seguridad Humana:** El sistema alcanzó un **Recall del 99.88%** en la clase somnolienta y solo **4 falsos negativos** sobre 3,366 casos reales de fatiga, minimizando el riesgo de episodios no detectados.
+3. **Eficiencia y Bajo Coste:** La convolución separable en profundidad redujo los requerimientos de cálculo en más de un 88%, haciendo viable la inferencia en CPU y el despliegue en computadoras portátiles comunes sin GPU. El FPS efectivo depende de la resolución, del equipo y de la red.
+4. **Empaquetamiento y Experiencia de Usuario:** La integración en Streamlit proporciona una plataforma apta para demostraciones de MVP, auditorías técnicas y entornos educativos. La pestaña de métricas se alimenta dinámicamente de `metrics.json`, evitando cifras desactualizadas.
+5. **Operación Offline-First:** El modo LAN usa únicamente candidatos host de WebRTC, sin contactar STUN/TURN externos. La interfaz no carga fuentes ni CDN, y la alarma se embebe en base64, por lo que el sistema puede demostrarse en una red local sin internet.
+6. **Alarma y Privacidad:** El audio se reproduce exclusivamente en el navegador del usuario. En despliegue local el video no sale de la LAN; en Streamlit Community Cloud solo llega al servidor de la aplicación y, si se configura TURN, atraviesa ese relay de forma cifrada. No se envían datos a servicios de analítica ni a CDN.
 
 ---
 
@@ -346,3 +366,6 @@ Para evolucionar el prototipo hacia un producto comercial de grado automotriz se
 3. **Optimización con Iluminación Infrarroja (NIR) y Cuantización a Edge Computing:**
    - Reentrenar el modelo con datasets capturados bajo cámaras infrarrojas cercanas (NIR) para garantizar operatividad en cabinas completamente a oscuras durante la conducción nocturna.
    - Cuantizar el modelo a formato **TensorFlow Lite (TFLite) INT8**, reduciendo su tamaño a menos de 50 KB y habilitando su despliegue en microcomputadoras de bajo consumo como Raspberry Pi 5 o módulos NVIDIA Jetson Orin Nano directamente integrados al espejo retrovisor del vehículo.
+4. **Validación Externa y Despliegue Remoto Seguro:**
+   - Evaluar el modelo con un conjunto externo (otras cámaras, iluminación, demografía y compresión de video) para confirmar que el AUC de 1.0000 no sea un artefacto del split actual.
+   - Para acceso fuera de la LAN, desplegar un TURN propio con credenciales rotativas, TLS mediante un proxy inverso y autenticación de usuarios; el certificado autofirmado y el TURN público de respaldo son solo para pruebas.

@@ -1,8 +1,8 @@
 # Requerimientos para el Sistema de Detección de Somnolencia en Conductores
 # Proyecto Sprint 2 - Deep Learning & Computer Vision
 #
-# IMPORTANTE: en Streamlit Cloud seleccionar Python 3.12 o 3.13.
-# TensorFlow 2.21 no publica wheels para Python 3.14 (cp314).
+# IMPORTANTE: en Streamlit Cloud seleccionar Python 3.12 en Advanced settings.
+# TensorFlow 2.21 no publica wheels para Python 3.14 (cp314); 3.12 es la opción estable.
 
 # Framework de Deep Learning
 # En Streamlit Cloud (Linux) se usa la build CPU para reducir consumo de recursos.
@@ -15,7 +15,16 @@ opencv-python-headless>=4.8.0
 pillow>=10.0.0
 
 # Interfaz Web Interactiva
-streamlit>=1.30.0
+streamlit>=1.51.0
+
+# Video en vivo desde el navegador/celular (WebRTC)
+# aiortc 1.15 exige av<18; no subir a av 18/19 porque rompe la resolución.
+streamlit-webrtc==0.79.0
+aiortc==1.15.0
+av>=15.1.0,<18.0.0
+
+# Generación del certificado HTTPS autofirmado (tools/generate_cert.py)
+cryptography>=44.0.0
 
 # Visualización y Métricas
 matplotlib>=3.8.0

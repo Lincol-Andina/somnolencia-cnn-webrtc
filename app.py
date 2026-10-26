@@ -12,6 +12,7 @@ import json
 import time
 import glob
 import random
+import ipaddress
 import threading
 from pathlib import Path
 
@@ -34,10 +35,15 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import av
 import cv2
 import tensorflow as tf
 from tensorflow import keras
 import streamlit.components.v1 as components
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
+from browser_alarm import inject_alarm_runtime, render_alarm_signal, trigger_alarm_once
+from webrtc_live import LiveState, build_rtc_configuration, get_lan_ip, get_lan_ips
 
 # Configuración inicial de la página en Streamlit
 st.set_page_config(
@@ -46,6 +52,58 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+def get_runtime_setting(name, default=None):
+    """Lee un ajuste desde st.secrets y, si no existe, desde el entorno."""
+    try:
+        value = st.secrets.get(name)
+        if value not in (None, ""):
+            return value
+    except Exception:
+        pass
+    value = os.getenv(name)
+    return value if value not in (None, "") else default
+
+
+def host_is_local():
+    """True si la app se abrió por localhost, IP privada o hostname sin dominio."""
+    try:
+        host = st.context.headers.get("Host") or st.context.headers.get("host") or ""
+    except Exception:
+        return True
+    if not host:
+        return True
+
+    host = host.split(":")[0].strip("[]").lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+    except ValueError:
+        local_suffixes = (".local", ".lan", ".home", ".home.arpa", ".internal", ".localdomain")
+        return host.endswith(local_suffixes) or "." not in host
+
+
+def is_cloud_deployment():
+    """Detecta despliegue remoto; DEPLOYMENT_MODE tiene prioridad."""
+    mode = str(get_runtime_setting("DEPLOYMENT_MODE", "") or "").strip().lower()
+    if mode in {"cloud", "remote", "internet"}:
+        return True
+    if mode in {"lan", "local"}:
+        return False
+    if any(
+        os.getenv(name)
+        for name in (
+            "STREAMLIT_SHARING",
+            "STREAMLIT_CLOUD",
+            "IS_STREAMLIT_CLOUD",
+            "STREAMLIT_SHARING_MODE",
+        )
+    ):
+        return True
+    return not host_is_local()
 
 
 def disable_browser_translation():
@@ -83,19 +141,21 @@ def disable_browser_translation():
 
 disable_browser_translation()
 
+# Runtime de alarma 100 % en el navegador (Web Audio API). No requiere internet.
+inject_alarm_runtime("alarm.wav")
+
 # =============================================================================
 # ESTILOS CSS PERSONALIZADOS (DISEÑO PROFESIONAL, GLASSMORPHISM Y ALTO IMPACTO)
 # =============================================================================
 CUSTOM_CSS = """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-
+    /* Tipografías del sistema: la app funciona sin conexión a internet. */
     html, body, [class*="css"] {
-        font-family: 'Outfit', sans-serif;
+        font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
     code, pre {
-        font-family: 'JetBrains Mono', monospace !important;
+        font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace !important;
     }
 
     /* Fondo principal y gradientes */
@@ -184,7 +244,7 @@ CUSTOM_CSS = """
         font-size: 1.7rem;
         font-weight: 700;
         color: #f1f5f9;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: 'Cascadia Code', 'Consolas', monospace;
     }
 
     /* Fases académicas */
@@ -212,35 +272,61 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # =============================================================================
-# FUNCIONES AUXILIARES: AUDIO, INFERENCIA Y CARGA DE MODELO
+# FUNCIONES AUXILIARES: INFERENCIA, ESTADO EN VIVO Y CARGA DE MODELO
 # =============================================================================
 
-def play_alarm_audio():
-    """Emite un tono acústico no bloqueante en Windows o reproduce el audio wav sintetizado."""
-    try:
-        import winsound
-        # Frecuencia aguda penetrante de advertencia (2500 Hz por 280 ms)
-        winsound.Beep(2500, 280)
-        return
-    except Exception:
-        pass
-
-    try:
-        import pygame
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        alarm_file = "alarm.wav"
-        if os.path.exists(alarm_file):
-            sound = pygame.mixer.Sound(alarm_file)
-            sound.play()
-    except Exception:
-        pass
+# El modelo cacheado puede ser usado por el hilo de WebRTC y por la interfaz.
+MODEL_LOCK = threading.Lock()
 
 
-def trigger_alarm_in_background():
-    """Dispara el sonido de alerta en un hilo secundario sin congelar el renderizado visual."""
-    t = threading.Thread(target=play_alarm_audio, daemon=True)
-    t.start()
+def get_live_state() -> LiveState:
+    """Devuelve el estado de la sesión actual (cada usuario tiene el suyo)."""
+    if "ddd_live_state" not in st.session_state:
+        st.session_state.ddd_live_state = LiveState()
+    return st.session_state.ddd_live_state
+
+
+def predict_prob(model, tensor) -> float:
+    """Inferencia thread-safe con el modelo compartido."""
+    if model is None:
+        return 0.0
+    with MODEL_LOCK:
+        return float(model(tensor, training=False).numpy()[0][0])
+
+
+def build_video_callback(state: LiveState, model):
+    """Crea el callback frame-a-frame ejecutado en el hilo de aiortc.
+
+    Importante: dentro de este callback NO se puede usar ``st.*``.
+    """
+
+    def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+        image_bgr = frame.to_ndarray(format="bgr24").copy()
+
+        prob_drowsy = 0.0
+        try:
+            tensor, _ = preprocess_frame(image_bgr, target_size=(64, 64))
+            prob_drowsy = predict_prob(model, tensor)
+        except Exception:
+            prob_drowsy = 0.0
+
+        snap = state.update(prob_drowsy)
+        is_drowsy = prob_drowsy >= float(snap["threshold"])
+        alarm_active = bool(snap["alert_active"])
+        status_text = "¡SOMNOLENCIA DETECTADA!" if is_drowsy else "Alerta / Despierto"
+
+        annotated = draw_hud_overlay(
+            image_bgr,
+            status_text=status_text,
+            is_drowsy=is_drowsy,
+            prob_drowsy=prob_drowsy,
+            fps=float(snap["fps"]),
+            consecutive_drowsy=int(snap["counter"]),
+            alarm_triggered=alarm_active,
+        )
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+    return video_frame_callback
 
 
 @st.cache_resource
@@ -347,6 +433,73 @@ st.markdown("""
 model = load_trained_model("model_ddd.keras")
 metrics = load_metrics_data("metrics.json")
 
+
+@st.fragment(run_every=0.25)
+def render_live_panel(state: LiveState, sound_enabled: bool) -> None:
+    """Panel de telemetría que se refresca sin reiniciar el stream WebRTC."""
+    snap = state.snapshot()
+    streaming = snap["last_ts"] > 0.0 and (time.time() - snap["last_ts"]) <= 2.0
+    alarm_active = bool(snap["alert_active"]) and streaming
+
+    render_alarm_signal(alarm_active, sound_enabled=sound_enabled, event_id=snap["event_id"])
+
+    if not streaming:
+        st.markdown("""
+        <div class="status-card" style="background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(148, 163, 184, 0.25); color: #94a3b8;">
+            <h3 style="margin: 0; font-size: 1.15rem;">⏳ Esperando video</h3>
+            <p style="margin: 6px 0 0 0;">Pulsa <b>START</b> y permite el acceso a la cámara.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    prob = float(snap["prob"])
+    counter = int(snap["counter"])
+    window = int(snap["window"])
+    fps = float(snap["fps"])
+    threshold = float(snap["threshold"])
+    is_drowsy = prob >= threshold
+
+    if alarm_active:
+        st.markdown(f"""
+        <div class="status-card status-drowsy">
+            <h2 style="margin: 0; font-size: 1.35rem;">🚨 ¡ALARMA CRÍTICA!</h2>
+            <p style="margin: 4px 0 0 0; font-weight: 600;">SOMNOLENCIA PERSISTENTE DETECTADA</p>
+            <p style="margin: 4px 0 0 0;">Buffer: {counter}/{window} frames</p>
+        </div>
+        """, unsafe_allow_html=True)
+    elif is_drowsy:
+        st.markdown(f"""
+        <div class="status-card status-drowsy">
+            <h3 style="margin: 0; font-size: 1.25rem;">⚠️ Somnolencia Detectada</h3>
+            <p style="margin: 4px 0 0 0;">Buffer: {counter}/{window} frames</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="status-card status-alert">
+            <h3 style="margin: 0; font-size: 1.25rem;">✅ Alerta / Despierto</h3>
+            <p style="margin: 4px 0 0 0;">Conductor atento a la vía</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("**Probabilidad de Somnolencia:**")
+    st.progress(min(1.0, max(0.0, prob)))
+
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-label">Telemetría en Vivo (navegador)</div>
+        <div style="font-size: 0.95rem; text-align: left; margin-top: 8px;">
+            • <b>FPS:</b> {fps:.1f}<br>
+            • <b>Confianza:</b> {prob * 100:.2f}%<br>
+            • <b>Umbral:</b> {threshold:.2f}<br>
+            • <b>Buffer Alerta:</b> {counter} / {window} frames<br>
+            • <b>Alarma Sonora:</b> {"🔔 ACTIVA EN NAVEGADOR" if alarm_active and sound_enabled else "🔕 INACTIVA"}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("La alarma se reproduce en este navegador; el servidor no emite audio.")
+
+
 # =============================================================================
 # PESTAÑAS DE NAVEGACIÓN
 # =============================================================================
@@ -364,8 +517,12 @@ with tab1:
     
     if model is None:
         st.warning("⚠️ **El modelo 'model_ddd.keras' aún no ha sido entrenado o localizado.** Por favor ejecuta `python train.py` o espera que termine el entrenamiento.")
-    
-    # Barra lateral de configuración para el MVP
+
+    cloud_mode = is_cloud_deployment()
+    turn_url_setting = get_runtime_setting("TURN_URL") or get_runtime_setting("TURN_URLS")
+    turn_configured = bool(turn_url_setting)
+
+    # Barra lateral de configuración
     with st.sidebar:
         st.markdown("### ⚙️ Parámetros del Sistema")
         threshold = st.slider(
@@ -382,11 +539,78 @@ with tab1:
             max_value=30,
             value=10,
             step=1,
-            help="Número de cuadros sucesivos con somnolencia antes de disparar la alarma acústica."
+            help="Número de cuadros sucesivos con somnolencia antes de activar la alarma."
         )
-        sound_enabled = st.toggle("Activar Alarma Sonora", value=True, help="Emite tono acústico cuando se supere la ventana temporal de somnolencia.")
-        camera_index = st.number_input("Índice de Cámara Web", min_value=0, max_value=5, value=0, step=1)
-        
+        sound_enabled = st.toggle(
+            "Activar Alarma Sonora (navegador)",
+            value=True,
+            help="El audio se reproduce con Web Audio API en el navegador del usuario; el servidor no emite sonido."
+        )
+        if st.button("🔊 Probar alarma en este navegador", width="stretch"):
+            trigger_alarm_once(f"test-{time.time_ns()}")
+
+        st.markdown("---")
+        st.markdown("### 🌐 Red y Video")
+        network_mode_label = st.radio(
+            "Modo de conexión WebRTC",
+            ["LAN / misma WiFi (sin internet)", "Internet / NAT (STUN/TURN)"],
+            index=1 if cloud_mode else 0,
+            help=(
+                "LAN usa solo candidatos host: funciona en la misma WiFi sin internet. "
+                "Internet usa STUN/TURN y es obligatorio cuando la app está en la nube."
+            ),
+        )
+        network_mode = "lan" if network_mode_label.startswith("LAN") else "internet"
+
+        use_public_turn = False
+        if network_mode == "internet":
+            use_public_turn = st.checkbox(
+                "Usar TURN público de respaldo (best-effort)",
+                value=cloud_mode and not turn_configured,
+                help=(
+                    "Útil si no configuraste TURN_URL/TURN_USERNAME/TURN_PASSWORD en Secrets. "
+                    "Depende de un servicio externo y puede fallar o tener latencia alta."
+                ),
+            )
+
+        camera_facing_label = st.radio(
+            "Cámara del dispositivo",
+            ["Frontal (conductor)", "Trasera"],
+            index=0,
+        )
+        camera_facing = "user" if camera_facing_label.startswith("Frontal") else "environment"
+
+        resolution_label = st.selectbox(
+            "Resolución de video",
+            ["640 × 480", "480 × 360", "320 × 240"],
+            index=0,
+            help="Bajar la resolución reduce CPU y ancho de banda.",
+        )
+        resolution_map = {
+            "640 × 480": (640, 480),
+            "480 × 360": (480, 360),
+            "320 × 240": (320, 240),
+        }
+        video_width, video_height = resolution_map[resolution_label]
+        target_fps = st.select_slider("FPS objetivo", options=[10, 15, 24], value=15)
+
+        if cloud_mode:
+            st.caption("Despliegue en la nube: la plataforma ya provee HTTPS.")
+            if not turn_configured:
+                st.caption(
+                    "WebRTC remoto: configura TURN en Secrets o deja activado el TURN público de respaldo."
+                )
+        else:
+            ssl_cert = st.get_option("server.sslCertFile")
+            scheme = "https" if ssl_cert else "http"
+            server_port = st.get_option("server.port") or 8501
+            lan_ips = get_lan_ips()
+            primary_lan_ip = lan_ips[0] if lan_ips else get_lan_ip()
+            st.caption(f"Celular en la misma WiFi: {scheme}://{primary_lan_ip}:{server_port}")
+            if len(lan_ips) > 1:
+                st.caption("Otras interfaces: " + ", ".join(lan_ips[1:3]))
+            st.caption("Si el celular no abre la cámara, revisa el aviso de HTTPS en el README.")
+
         st.markdown("---")
         st.markdown("### ℹ️ Leyenda de Estados")
         st.markdown("🟢 **Alerta / Despierto:** Probabilidad < Umbral")
@@ -398,141 +622,90 @@ with tab1:
         st.markdown("#### 🎛️ Modo de Evaluación")
         eval_mode = st.radio(
             "Selecciona fuente de entrada:",
-            ["Subir Imagen / Foto de Prueba", "Cámara Web en Vivo", "Muestras del Dataset DDD"],
-            index=0
+            [
+                "📱 Cámara del Celular / WebRTC",
+                "📤 Subir Imagen / Foto de Prueba",
+                "📁 Muestras del Dataset DDD",
+            ],
+            index=0,
         )
 
-        # Variables de estado en tiempo real
+        # Contenedores usados por los modos de imagen y dataset.
         status_container = st.empty()
         confidence_container = st.empty()
         telemetry_container = st.empty()
 
-    # MODO 1: CÁMARA WEB EN VIVO CON OPENCV
-    if eval_mode == "Cámara Web en Vivo":
+    # MODO 1: VIDEO EN VIVO DESDE EL NAVEGADOR/CELULAR (WEBRTC)
+    if eval_mode == "📱 Cámara del Celular / WebRTC":
         with col_view:
-            st.markdown("##### 🔴 Transmisión de Video en Directo")
-            st.info("Este modo usa la cámara del equipo donde se ejecuta Streamlit. En Streamlit Cloud usa 'Subir Imagen / Foto de Prueba'.")
-            video_placeholder = st.empty()
-            
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                start_webcam = st.button("▶️ Iniciar Cámara Web", use_container_width=True, type="primary")
-            with col_btn2:
-                stop_webcam = st.button("⏹️ Detener Cámara Web", use_container_width=True)
+            st.markdown("##### 📱 Video en Vivo desde el Celular / Navegador")
+            st.caption(
+                "El navegador envía el video al servidor, la CNN infiere frame a frame "
+                "y devuelve el video anotado. La alarma suena en el navegador, no en el servidor."
+            )
 
-            if "webcam_running" not in st.session_state:
-                st.session_state.webcam_running = False
+            if model is None:
+                st.warning("El modelo no está disponible; se mostrará el video sin inferencia.")
 
-            if start_webcam:
-                st.session_state.webcam_running = True
-            if stop_webcam:
-                st.session_state.webcam_running = False
+            live_state = get_live_state()
+            live_state.configure(
+                threshold=threshold,
+                window=alert_consecutive_frames,
+                sound_enabled=sound_enabled,
+            )
 
-            if st.session_state.webcam_running:
-                cap = cv2.VideoCapture(int(camera_index))
-                
-                if not cap.isOpened():
-                    st.error(f"❌ No fue posible acceder a la cámara con índice {camera_index}. Verifica que esté conectada y tenga permisos.")
-                    st.session_state.webcam_running = False
-                else:
-                    consecutive_drowsy_count = 0
-                    prev_time = time.time()
-                    last_alarm_time = 0
+            rtc_configuration = build_rtc_configuration(
+                network_mode=network_mode,
+                use_public_turn=use_public_turn,
+                stun_urls=get_runtime_setting("STUN_URL"),
+                turn_urls=turn_url_setting,
+                turn_username=get_runtime_setting("TURN_USERNAME"),
+                turn_credential=(
+                    get_runtime_setting("TURN_PASSWORD")
+                    or get_runtime_setting("TURN_CREDENTIAL")
+                ),
+            )
 
-                    while st.session_state.webcam_running:
-                        ret, frame = cap.read()
-                        if not ret:
-                            st.warning("⚠️ Señal de video perdida o finalizada.")
-                            break
-
-                        current_time = time.time()
-                        fps = 1.0 / max(1e-4, (current_time - prev_time))
-                        prev_time = current_time
-
-                        # Inferencia con la CNN
-                        prob_drowsy = 0.0
-                        if model is not None:
-                            tensor, _ = preprocess_frame(frame, target_size=(64, 64))
-                            prob_drowsy = float(model(tensor, training=False).numpy()[0][0])
-
-                        is_drowsy = prob_drowsy >= threshold
-
-                        if is_drowsy:
-                            consecutive_drowsy_count += 1
-                        else:
-                            consecutive_drowsy_count = max(0, consecutive_drowsy_count - 1)
-
-                        alarm_active = consecutive_drowsy_count >= alert_consecutive_frames
-
-                        # Disparo de alarma acústica no bloqueante
-                        if alarm_active and sound_enabled:
-                            if current_time - last_alarm_time > 0.8:  # Evita saturar la reproducción
-                                trigger_alarm_in_background()
-                                last_alarm_time = current_time
-
-                        status_label = "¡SOMNOLENCIA DETECTADA!" if is_drowsy else "Alerta / Despierto"
-
-                        # Dibujar HUD en el frame
-                        annotated_frame = draw_hud_overlay(
-                            frame,
-                            status_text=status_label,
-                            is_drowsy=is_drowsy,
-                            prob_drowsy=prob_drowsy,
-                            fps=fps,
-                            consecutive_drowsy=consecutive_drowsy_count,
-                            alarm_triggered=alarm_active
-                        )
-
-                        # Renderizado del video en Streamlit (RGB)
-                        frame_disp = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                        video_placeholder.image(frame_disp, channels="RGB", use_container_width=True)
-
-                        # Actualización de tarjetas de telemetría lateral
-                        if alarm_active:
-                            status_container.markdown("""
-                            <div class="status-card status-drowsy">
-                                <h2 style="margin: 0; font-size: 1.4rem;">🚨 ¡ALARMA CRÍTICA!</h2>
-                                <p style="margin: 4px 0 0 0; font-weight: 600;">SOMNOLENCIA PERSISTENTE DETECTADA</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        elif is_drowsy:
-                            status_container.markdown("""
-                            <div class="status-card status-drowsy">
-                                <h3 style="margin: 0; font-size: 1.3rem;">⚠️ Somnolencia Detectada</h3>
-                                <p style="margin: 4px 0 0 0;">Buffer: {}/{} frames</p>
-                            </div>
-                            """.format(consecutive_drowsy_count, alert_consecutive_frames), unsafe_allow_html=True)
-                        else:
-                            status_container.markdown("""
-                            <div class="status-card status-alert">
-                                <h3 style="margin: 0; font-size: 1.3rem;">✅ Alerta / Despierto</h3>
-                                <p style="margin: 4px 0 0 0;">Conductor atento a la vía</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-
-                        confidence_container.markdown(f"""
-                        **Probabilidad de Somnolencia:**
-                        """)
-                        confidence_container.progress(min(1.0, max(0.0, prob_drowsy)))
-
-                        telemetry_container.markdown(f"""
-                        <div class="metric-card">
-                            <div class="metric-label">Telemetría en Vivo</div>
-                            <div style="font-size: 0.95rem; text-align: left; margin-top: 8px;">
-                                • <b>FPS:</b> {fps:.1f}<br>
-                                • <b>Confianza:</b> {prob_drowsy*100:.2f}%<br>
-                                • <b>Buffer Alerta:</b> {consecutive_drowsy_count} / {alert_consecutive_frames} frames<br>
-                                • <b>Alarma Sonora:</b> {"🔔 ACTIVA" if alarm_active else "🔕 INACTIVA"}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                    cap.release()
+            if network_mode == "lan":
+                st.caption("Modo LAN: solo candidatos host; no se contactan servidores STUN/TURN externos.")
             else:
-                video_placeholder.info("ℹ️ Presiona **'▶️ Iniciar Cámara Web'** para activar el flujo de video en vivo y detección en tiempo real.")
+                st.caption("Modo Internet: STUN/TURN. Si no conecta, configura TURN o activa el TURN público de respaldo.")
+
+            webrtc_streamer(
+                key="ddd-webrtc",
+                mode=WebRtcMode.SENDRECV,
+                rtc_configuration=rtc_configuration,
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": video_width},
+                        "height": {"ideal": video_height},
+                        "frameRate": {"ideal": target_fps, "max": target_fps},
+                        "facingMode": {"ideal": camera_facing},
+                    },
+                    "audio": False,
+                },
+                video_frame_callback=build_video_callback(live_state, model),
+                async_processing=True,
+                media_toggle_controls=False,
+                on_video_ended=live_state.reset,
+            )
+
+            if cloud_mode:
+                st.caption(
+                    "En la nube, abre la URL HTTPS de la app y permite la cámara. "
+                    "La conexión WebRTC usará STUN/TURN."
+                )
+            else:
+                st.caption(
+                    f"En el celular abre {scheme}://{primary_lan_ip}:{server_port} y acepta el certificado. "
+                    "Si la URL es http, la cámara del celular será bloqueada por el navegador."
+                )
+
+        with col_controls:
+            render_live_panel(live_state, sound_enabled)
 
     # MODO 2: SUBIR IMAGEN O FOTO DE PRUEBA
-    elif eval_mode == "Subir Imagen / Foto de Prueba":
+    elif eval_mode == "📤 Subir Imagen / Foto de Prueba":
         with col_view:
             st.markdown("##### 📤 Cargar Archivo de Imagen")
             uploaded_file = st.file_uploader("Arrastra una imagen o selecciona un archivo (JPG, PNG)", type=["jpg", "jpeg", "png"])
@@ -555,7 +728,7 @@ with tab1:
                 label = f"{'DROWSY' if is_drowsy else 'ALERT'} ({prob_drowsy*100:.1f}%)"
                 cv2.putText(annotated, label, (20, 45), cv2.FONT_HERSHEY_DUPLEX, 1.0, color, 2, cv2.LINE_AA)
 
-                st.image(annotated, caption="Resultado del Análisis de Somnolencia", use_container_width=True)
+                st.image(annotated, caption="Resultado del Análisis de Somnolencia", width="stretch")
 
                 if is_drowsy:
                     status_container.markdown("""
@@ -565,7 +738,7 @@ with tab1:
                     </div>
                     """.format(prob_drowsy * 100), unsafe_allow_html=True)
                     if sound_enabled:
-                        trigger_alarm_in_background()
+                        trigger_alarm_once(f"upload-{time.time_ns()}")
                 else:
                     status_container.markdown("""
                     <div class="status-card status-alert">
@@ -577,22 +750,38 @@ with tab1:
                 confidence_container.progress(prob_drowsy)
 
     # MODO 3: MUESTRAS DEL DATASET DDD
-    elif eval_mode == "Muestras del Dataset DDD":
+    elif eval_mode == "📁 Muestras del Dataset DDD":
         with col_view:
             st.markdown("##### 📁 Demostración Rápida con Muestras Reales del Dataset")
+            dataset_root = Path("Driver Drowsiness Dataset (DDD)")
+            dataset_available = dataset_root.is_dir()
+            if not dataset_available:
+                st.info(
+                    "El dataset DDD no está disponible en este entorno (no se versiona en la nube). "
+                    "Usa la cámara WebRTC o el modo **Subir Imagen**."
+                )
+
             col_s1, col_s2 = st.columns(2)
             with col_s1:
-                test_drowsy = st.button("🧪 Probar Muestra 'Drowsy' (Somnoliento)", use_container_width=True)
+                test_drowsy = st.button(
+                    "🧪 Probar Muestra 'Drowsy' (Somnoliento)",
+                    width="stretch",
+                    disabled=not dataset_available,
+                )
             with col_s2:
-                test_alert = st.button("🧪 Probar Muestra 'Non Drowsy' (Despierto)", use_container_width=True)
+                test_alert = st.button(
+                    "🧪 Probar Muestra 'Non Drowsy' (Despierto)",
+                    width="stretch",
+                    disabled=not dataset_available,
+                )
 
             selected_image_path = None
             if test_drowsy:
-                drowsy_files = glob.glob("Driver Drowsiness Dataset (DDD)/Drowsy/*.png")
+                drowsy_files = glob.glob(str(dataset_root / "Drowsy" / "*.png"))
                 if drowsy_files:
                     selected_image_path = random.choice(drowsy_files)
             elif test_alert:
-                alert_files = glob.glob("Driver Drowsiness Dataset (DDD)/Non Drowsy/*.png")
+                alert_files = glob.glob(str(dataset_root / "Non Drowsy" / "*.png"))
                 if alert_files:
                     selected_image_path = random.choice(alert_files)
 
@@ -612,7 +801,7 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                     if sound_enabled:
-                        trigger_alarm_in_background()
+                        trigger_alarm_once(f"dataset-{time.time_ns()}")
                 else:
                     status_container.markdown(f"""
                     <div class="status-card status-alert">
@@ -637,7 +826,25 @@ with tab2:
         st.info("ℹ️ Las métricas estarán disponibles una vez completado el entrenamiento con `python train.py`.")
     else:
         ov = metrics.get("overall_metrics", {})
-        
+        clf_rep = metrics.get("classification_report", {})
+        cm_raw = metrics.get("confusion_matrix", {}).get("raw", [[0, 0], [0, 0]])
+        cm_norm = metrics.get("confusion_matrix", {}).get("normalized", [[0, 0], [0, 0]])
+        tn, fp = int(cm_raw[0][0]), int(cm_raw[0][1])
+        fn, tp = int(cm_raw[1][0]), int(cm_raw[1][1])
+        total_test = int(metrics.get("total_test_samples", 0))
+        non_drowsy_support = int(clf_rep.get("Non Drowsy", {}).get("support", tn + fp))
+        drowsy_support = int(clf_rep.get("Drowsy", {}).get("support", fn + tp))
+        hist = metrics.get("history", {})
+        epochs_run = len(hist.get("epochs", [])) or 0
+        train_acc_first = hist.get("train_accuracy", [0])[0] * 100 if hist.get("train_accuracy") else 0
+        train_acc_last = hist.get("train_accuracy", [0])[-1] * 100 if hist.get("train_accuracy") else 0
+        val_acc_first = hist.get("val_accuracy", [0])[0] * 100 if hist.get("val_accuracy") else 0
+        val_acc_last = hist.get("val_accuracy", [0])[-1] * 100 if hist.get("val_accuracy") else 0
+        train_loss_first = hist.get("train_loss", [0])[0] if hist.get("train_loss") else 0
+        train_loss_last = hist.get("train_loss", [0])[-1] if hist.get("train_loss") else 0
+        val_loss_first = hist.get("val_loss", [0])[0] if hist.get("val_loss") else 0
+        val_loss_last = hist.get("val_loss", [0])[-1] if hist.get("val_loss") else 0
+
         # 1. Tarjetas Superiores de Métricas Globales
         m1, m2, m3, m4, m5 = st.columns(5)
         with m1:
@@ -686,9 +893,10 @@ with tab2:
         <div style="background: rgba(15, 23, 42, 0.75); border-left: 4px solid #38bdf8; border-radius: 8px; padding: 14px 18px; margin-top: 14px; margin-bottom: 22px;">
             <b style="color: #38bdf8; font-size: 0.95rem;">💡 Interpretación Ejecutiva de las Métricas Globales:</b>
             <p style="color: #cbd5e1; font-size: 0.88rem; margin: 6px 0 0 0; line-height: 1.5;">
-                • <b>Priorización de Seguridad (Recall {ov.get('recall', 0)*100:.2f}%):</b> En sistemas de seguridad vehicular (norma ISO 26262), omitir a un conductor dormido (Falso Negativo) es fatal. El modelo captura prácticamente el 97% de los eventos reales de somnolencia.<br>
-                • <b>Capacidad Discriminativa (AUC {ov.get('roc_auc', 0):.4f}):</b> Al superar el umbral estándar de 0.90, el clasificador demuestra una separación casi óptima entre las distribuciones de probabilidad de conductores despiertos y fatigados.<br>
-                • <b>Balance Operativo (F1-Score {ov.get('f1_score', 0):.4f}):</b> La combinación armónica de alta sensibilidad (96.56%) con una precisión respetable (81.35%) asegura que el conductor reciba advertencias oportunas sin padecer fatiga de alarma.
+                • <b>Priorización de Seguridad (Recall {ov.get('recall', 0)*100:.2f}%):</b> En sistemas de seguridad vehicular (norma ISO 26262), omitir a un conductor dormido (Falso Negativo) es fatal. El modelo captura el {ov.get('recall', 0)*100:.2f}% de los eventos reales de somnolencia.<br>
+                • <b>Capacidad Discriminativa (AUC {ov.get('roc_auc', 0):.4f}):</b> Al superar el umbral estándar de 0.90, el clasificador demuestra una separación casi perfecta entre las distribuciones de probabilidad de conductores despiertos y fatigados.<br>
+                • <b>Balance Operativo (F1-Score {ov.get('f1_score', 0):.4f}):</b> La combinación armónica de alta sensibilidad ({ov.get('recall', 0)*100:.2f}%) con una precisión del {ov.get('precision', 0)*100:.2f}% asegura advertencias oportunas sin fatiga de alarma.<br>
+                • <b>Alcance de la Evaluación:</b> El split es aleatorio sobre el dataset; para certificar la generalización se requiere validación externa con sujetos, cámaras e iluminación no vistos durante el entrenamiento.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -699,7 +907,7 @@ with tab2:
         with g_col1:
             st.markdown("#### 📈 Curva ROC (Receiver Operating Characteristic)")
             if os.path.exists("roc_curve.png"):
-                st.image("roc_curve.png", caption="Curva ROC vs Clasificador Aleatorio", use_container_width=True)
+                st.image("roc_curve.png", caption="Curva ROC vs Clasificador Aleatorio", width="stretch")
             else:
                 roc_data = metrics.get("roc_curve", {})
                 fig_roc, ax_roc = plt.subplots(figsize=(6, 5))
@@ -710,12 +918,12 @@ with tab2:
                 ax_roc.legend()
                 st.pyplot(fig_roc)
 
-            st.markdown("""
+            st.markdown(f"""
             <div style="background: rgba(30, 41, 59, 0.65); border: 1px solid rgba(56, 189, 248, 0.2); border-radius: 10px; padding: 14px; margin-top: 8px;">
                 <b style="color: #38bdf8; font-size: 0.9rem;">🔍 Interpretación de la Curva ROC:</b>
                 <ul style="color: #cbd5e1; font-size: 0.85rem; margin: 6px 0 0 0; padding-left: 18px; line-height: 1.45;">
-                    <li><b>Comportamiento de la Curva:</b> La curva asciende rápidamente pegada al eje vertical superior izquierdo, lo que indica una tasa de verdaderos positivos (TPR) superior al 95% con tasas de falsos positivos (FPR) por debajo del 15%.</li>
-                    <li><b>Valor AUC = 0.9486:</b> Significa que si seleccionamos al azar un conductor somnoliento y uno despierto, la CNN asignará una probabilidad de fatiga más alta al conductor somnoliento en el <b>94.86% de los casos</b>.</li>
+                    <li><b>Comportamiento de la Curva:</b> La curva se mantiene pegada al eje vertical superior izquierdo: alcanza una tasa de verdaderos positivos (TPR) superior al 99% con una tasa de falsos positivos (FPR) cercana al 1%.</li>
+                    <li><b>Valor AUC = {ov.get('roc_auc', 0):.4f}:</b> Significa que si seleccionamos al azar un conductor somnoliento y uno despierto, la CNN asignará una probabilidad de fatiga más alta al conductor somnoliento en el <b>{ov.get('roc_auc', 0)*100:.2f}% de los casos</b>.</li>
                     <li><b>Comparación de Referencia:</b> Supera ampliamente la línea diagonal punteada gris (clasificador aleatorio con AUC = 0.50), confirmando un aprendizaje estadístico genuino y reproducible.</li>
                 </ul>
             </div>
@@ -724,20 +932,20 @@ with tab2:
         with g_col2:
             st.markdown("#### 🎯 Matriz de Confusión Normalizada")
             if os.path.exists("confusion_matrix.png"):
-                st.image("confusion_matrix.png", caption="Matriz de Confusión Normalizada por Fila", use_container_width=True)
+                st.image("confusion_matrix.png", caption="Matriz de Confusión Normalizada por Fila", width="stretch")
             else:
                 cm_data = np.array(metrics.get("confusion_matrix", {}).get("normalized", [[1, 0], [0, 1]]))
                 fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
                 sns.heatmap(cm_data, annot=True, fmt=".2%", cmap="Blues", ax=ax_cm, xticklabels=["No Somnoliento", "Somnoliento"], yticklabels=["No Somnoliento", "Somnoliento"])
                 st.pyplot(fig_cm)
 
-            st.markdown("""
+            st.markdown(f"""
             <div style="background: rgba(30, 41, 59, 0.65); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 10px; padding: 14px; margin-top: 8px;">
                 <b style="color: #818cf8; font-size: 0.9rem;">🔍 Interpretación de la Matriz de Confusión:</b>
                 <ul style="color: #cbd5e1; font-size: 0.85rem; margin: 6px 0 0 0; padding-left: 18px; line-height: 1.45;">
-                    <li><b>Acierto en Somnolencia (Verdaderos Positivos = 96.56%):</b> De 610 casos reales de fatiga, el modelo clasificó correctamente 589. Solo 21 imágenes (<b>3.44%</b>) fueron falsos negativos, lo que minimiza el riesgo de accidentes no detectados.</li>
-                    <li><b>Acierto en Alerta (Verdaderos Negativos = 75.09%):</b> 407 de 542 conductores despiertos fueron identificados con exactitud.</li>
-                    <li><b>Falsas Alarmas (24.91%):</b> Las 135 confusiones se deben a parpadeos naturales intermedios o sombras en la cavidad ocular, situaciones neutralizadas en la práctica por el <b>buffer temporal de 10 cuadros</b> en el MVP.</li>
+                    <li><b>Acierto en Somnolencia (Verdaderos Positivos = {cm_norm[1][1]*100:.2f}%):</b> De {drowsy_support} casos reales de fatiga, el modelo clasificó correctamente {tp}. Solo {fn} imágenes (<b>{cm_norm[1][0]*100:.2f}%</b>) fueron falsos negativos, minimizando el riesgo de accidentes no detectados.</li>
+                    <li><b>Acierto en Alerta (Verdaderos Negativos = {cm_norm[0][0]*100:.2f}%):</b> {tn} de {non_drowsy_support} conductores despiertos fueron identificados con exactitud.</li>
+                    <li><b>Falsas Alarmas ({cm_norm[0][1]*100:.2f}%):</b> Solo {fp} casos se confundieron por parpadeos naturales o sombras oculares; el <b>buffer temporal configurable</b> del MVP neutraliza estos eventos aislados.</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
@@ -750,27 +958,26 @@ with tab2:
         with t_col1:
             st.markdown("#### 📉 Evolución del Entrenamiento (Train vs Val por Época)")
             if os.path.exists("training_curves.png"):
-                st.image("training_curves.png", caption="Curvas de Precisión y Pérdida por Época", use_container_width=True)
+                st.image("training_curves.png", caption="Curvas de Precisión y Pérdida por Época", width="stretch")
             else:
                 hist = metrics.get("history", {})
                 if hist:
                     df_hist = pd.DataFrame(hist)
                     st.line_chart(df_hist.set_index("epochs")[["train_accuracy", "val_accuracy"]])
 
-            st.markdown("""
+            st.markdown(f"""
             <div style="background: rgba(30, 41, 59, 0.65); border: 1px solid rgba(52, 211, 153, 0.2); border-radius: 10px; padding: 14px; margin-top: 8px;">
                 <b style="color: #34d399; font-size: 0.9rem;">🔍 Interpretación de las Curvas de Aprendizaje:</b>
                 <ul style="color: #cbd5e1; font-size: 0.85rem; margin: 6px 0 0 0; padding-left: 18px; line-height: 1.45;">
-                    <li><b>Convergencia Estable de Pérdida (Loss):</b> La función de costo (Binary Crossentropy) desciende consistentemente desde 0.628 hasta 0.204 en entrenamiento y hasta 0.351 en validación, evidenciando un ajuste progresivo de pesos sin oscilaciones caóticas.</li>
-                    <li><b>Evolución de la Precisión (Accuracy):</b> La precisión escala del 64.75% al 91.89% en entrenamiento y al 86.11% en validación en tan solo 6 épocas.</li>
-                    <li><b>Control del Sobreajuste (Generalización):</b> La proximidad entre las curvas de entrenamiento y validación valida la efectividad del <i>Dropout</i> (30% y 40%) y de la capa <i>BatchNormalization</i>, evitando la memorización espuria de rostros particulares.</li>
+                    <li><b>Convergencia de Pérdida (Loss):</b> La función de costo (Binary Crossentropy) desciende desde {train_loss_first:.4f} hasta {train_loss_last:.4f} en entrenamiento y hasta {val_loss_last:.4f} en validación, con oscilaciones intermedias controladas por <i>EarlyStopping</i> y reducción de la tasa de aprendizaje.</li>
+                    <li><b>Evolución de la Precisión (Accuracy):</b> La precisión escala del {train_acc_first:.2f}% al {train_acc_last:.2f}% en entrenamiento y del {val_acc_first:.2f}% al {val_acc_last:.2f}% en validación a lo largo de {epochs_run} épocas.</li>
+                    <li><b>Control del Sobreajuste (Generalización):</b> La cercanía final entre las curvas de entrenamiento y validación valida la efectividad del <i>Dropout</i> (30% y 40%) y de la capa <i>BatchNormalization</i>, evitando la memorización espuria de rostros particulares.</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
 
         with t_col2:
             st.markdown("#### 📋 Reporte de Clasificación Detallado")
-            clf_rep = metrics.get("classification_report", {})
             if clf_rep:
                 rep_rows = []
                 for label in ["Non Drowsy", "Drowsy", "macro avg", "weighted avg"]:
@@ -785,13 +992,13 @@ with tab2:
                         })
                 st.table(pd.DataFrame(rep_rows))
 
-                st.markdown("""
+                st.markdown(f"""
                 <div style="background: rgba(30, 41, 59, 0.65); border: 1px solid rgba(244, 114, 182, 0.2); border-radius: 10px; padding: 14px; margin-top: 8px;">
                     <b style="color: #f472b6; font-size: 0.9rem;">🔍 Interpretación del Reporte por Clase:</b>
                     <ul style="color: #cbd5e1; font-size: 0.85rem; margin: 6px 0 0 0; padding-left: 18px; line-height: 1.45;">
-                        <li><b>Clase No Somnoliento (Alerta):</b> Exhibe una altísima <b>precisión de 95.09%</b>, lo que asegura que cuando el modelo dictamina que el conductor está despierto, la probabilidad de error es inferior al 5%.</li>
-                        <li><b>Clase Somnoliento (Fatiga):</b> Alcanza un <b>recall del 96.56%</b> y <b>F1 de 0.8831</b>, confirmando que es altamente sensible ante cualquier indicio de párpados caídos o sueño.</li>
-                        <li><b>Soporte Estadístico:</b> Evaluado sobre 1,152 imágenes de prueba (542 Alerta vs 610 Somnoliento), constituyendo un benchmark balanceado y confiable.</li>
+                        <li><b>Clase No Somnoliento (Alerta):</b> Exhibe una <b>precisión de {clf_rep.get('Non Drowsy', {}).get('precision', 0)*100:.2f}%</b>, asegurando que cuando el modelo dictamina que el conductor está despierto, la probabilidad de error es mínima.</li>
+                        <li><b>Clase Somnoliento (Fatiga):</b> Alcanza un <b>recall del {clf_rep.get('Drowsy', {}).get('recall', 0)*100:.2f}%</b> y <b>F1 de {clf_rep.get('Drowsy', {}).get('f1-score', 0):.4f}</b>, confirmando alta sensibilidad ante párpados caídos o microsueños.</li>
+                        <li><b>Soporte Estadístico:</b> Evaluado sobre {total_test:,} imágenes de prueba ({non_drowsy_support:,} Alerta vs {drowsy_support:,} Somnoliento), constituyendo un benchmark balanceado y confiable.</li>
                     </ul>
                 </div>
                 """, unsafe_allow_html=True)
@@ -968,5 +1175,5 @@ with tab3:
         {"Capa": "Salida Clasificador", "Tipo": "Dense (1, Sigmoid)", "Dimensión de Salida": "(None, 1)", "Parámetros": 65, "Propósito": "P(Somnoliento | Imagen) continua"}
     ]
     df_layers = pd.DataFrame(layers_data)
-    st.dataframe(df_layers, use_container_width=True, hide_index=True)
+    st.dataframe(df_layers, width="stretch", hide_index=True)
     st.caption("Total de parámetros: ~36,737 (~143.5 KB) | Diseñado para latencias de inferencia < 15 ms en CPU.")

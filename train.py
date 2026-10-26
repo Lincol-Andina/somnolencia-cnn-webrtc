@@ -466,14 +466,14 @@ def main():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=8,
-        help="Número máximo de épocas de entrenamiento"
+        default=15,
+        help="Número máximo de épocas de entrenamiento (EarlyStopping puede detener antes)"
     )
     parser.add_argument(
         "--max_samples",
         type=int,
-        default=9600,
-        help="Número máximo de muestras para entrenamiento ágil (0 o None para dataset completo)"
+        default=0,
+        help="Número máximo de muestras (0 = dataset completo; use 9600 para una prueba rápida)"
     )
     parser.add_argument(
         "--learning_rate",
