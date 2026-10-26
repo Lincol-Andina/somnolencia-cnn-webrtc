@@ -31,6 +31,10 @@ if sys.platform == "win32":
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
+# Importar WebRTC antes de TensorFlow: pylibsrtp inicializa OpenSSL al importar
+# y en Streamlit Cloud falla si se carga despues de las extensiones pesadas.
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
+
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -43,7 +47,6 @@ import cv2
 import tensorflow as tf
 from tensorflow import keras
 import streamlit.components.v1 as components
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from browser_alarm import inject_alarm_runtime, render_alarm_signal, trigger_alarm_once
 from webrtc_live import LiveState, build_rtc_configuration, get_lan_ip, get_lan_ips
